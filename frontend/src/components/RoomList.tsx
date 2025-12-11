@@ -3,12 +3,12 @@ import io from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import { FiCopy as Copy, FiCheck as Check } from 'react-icons/fi';
 
-const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL || 'http://localhost:4000';
-
 export default function RoomList({ onJoin, userName }: { onJoin: (id: string) => void; userName: string }) {
   const [newRoom, setNewRoom] = useState('');
   const [rooms, setRooms] = useState<string[]>([]);
-  const [socket] = useState(() => io(SIGNAL_URL));
+  const [socket] = useState(() => io('/video-conference-socket.io', {
+    path: '/video-conference-socket.io'
+  }));
   const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
   const navigate = useNavigate();
 

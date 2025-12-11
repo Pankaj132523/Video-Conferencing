@@ -6,12 +6,12 @@ import ChatPanel from './ChatPanel';
 import CallControls from './CallControls';
 import TopBar from './TopBar';
 
-const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL || 'http://localhost:4000';
-
 type PeerInfo = { id: string; userName: string };
 
 export default function Room({ roomId, userName, onLeave }: { roomId: string; userName: string; onLeave: () => void }) {
-  const [socket] = useState(() => io(SIGNAL_URL));
+  const [socket] = useState(() => io('/video-conference-socket.io', {
+    path: '/video-conference-socket.io'
+  }));
   const [videoMap, setVideoMap] = useState<Record<string, MediaStream | undefined>>({});
   const [shareMap, setShareMap] = useState<Record<string, MediaStream | undefined>>({});
   const [peerNames, setPeerNames] = useState<Record<string, string>>({});
@@ -77,11 +77,11 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
 
     const joinRoom = () => socket.emit('join-room', { roomId, userName });
     if (socket.connected) {
-      setSelfId(socket.id);
+      setSelfId(socket.id ?? '');
       joinRoom();
     } else {
       socket.once('connect', () => {
-        setSelfId(socket.id);
+        setSelfId(socket.id ?? '');
         joinRoom();
       });
     }
