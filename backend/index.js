@@ -13,11 +13,8 @@ const io = new Server(server, {
   cors: { origin: '*' }
 });
 
-// In-memory rooms map: { roomId: Set(socketId) }
 const rooms = new Map();
-// room metadata: { shareOwner: socketId|null, shareName: string|null }
 const roomMeta = new Map();
-// Track socketId -> userName for display
 const userNames = new Map();
 
 const broadcastRooms = () => {
@@ -34,10 +31,8 @@ io.on('connection', (socket) => {
     rooms.get(roomId).add(socket.id);
     if (!roomMeta.has(roomId)) roomMeta.set(roomId, { shareOwner: null, shareName: null });
 
-    // notify existing peers about the new peer
     socket.to(roomId).emit('peer-joined', { socketId: socket.id, userName });
 
-    // send current peers to the joining client (with names)
     const peers = Array.from(rooms.get(roomId))
       .filter(id => id !== socket.id)
       .map(id => ({ id, userName: userNames.get(id) || 'Guest' }));
@@ -99,4 +94,3 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => console.log('Signaling server running on', PORT));
-

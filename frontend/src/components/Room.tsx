@@ -3,6 +3,8 @@ import io from 'socket.io-client';
 import { PeerManager } from '../services/peerManager';
 import VideoGrid from './VideoGrid';
 import ChatPanel from './ChatPanel';
+import CallControls from './CallControls';
+import TopBar from './TopBar';
 
 const SIGNAL_URL = import.meta.env.VITE_SIGNAL_URL || 'http://localhost:4000';
 
@@ -13,6 +15,8 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
   const [videoMap, setVideoMap] = useState<Record<string, MediaStream | undefined>>({});
   const [shareMap, setShareMap] = useState<Record<string, MediaStream | undefined>>({});
   const [peerNames, setPeerNames] = useState<Record<string, string>>({});
+  const [peerMicStates, setPeerMicStates] = useState<Record<string, boolean>>({});
+  const [peerCamStates, setPeerCamStates] = useState<Record<string, boolean>>({});
   const [messages, setMessages] = useState<any[]>([]);
   const [pm, setPm] = useState<PeerManager | null>(null);
   const [micOn, setMicOn] = useState(true);
@@ -27,9 +31,41 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
       (to, data) => socket.emit('signal', { to, from: socket.id, data }),
       (id, stream, isShare) => {
         if (isShare) {
+          console.log('Screen share received from:', id, stream);
           setShareMap(prev => ({ ...prev, [id]: stream }));
+          setVideoMap(prev => {
+            const updated = { ...prev };
+            delete updated[id];
+            return updated;
+          });
         } else {
           setVideoMap(prev => ({ ...prev, [id]: stream }));
+          setShareMap(prev => {
+            const updated = { ...prev };
+            delete updated[id];
+            return updated;
+          });
+          const audioTrack = stream.getAudioTracks().find(t => t.readyState === 'live');
+          const videoTrack = stream.getVideoTracks().find(t => t.readyState === 'live');
+          if (audioTrack) {
+            setPeerMicStates(p => ({ ...p, [id]: audioTrack.enabled }));
+            audioTrack.onmute = () => setPeerMicStates(p => ({ ...p, [id]: false }));
+            audioTrack.onunmute = () => setPeerMicStates(p => ({ ...p, [id]: true }));
+          }
+          if (videoTrack) {
+            setPeerCamStates(p => ({ ...p, [id]: videoTrack.enabled }));
+            videoTrack.onended = () => setPeerCamStates(p => ({ ...p, [id]: false }));
+            const checkVideoState = () => {
+              setPeerCamStates(p => ({ ...p, [id]: videoTrack.enabled }));
+            };
+            const interval = setInterval(() => {
+              if (videoTrack.readyState === 'live') {
+                checkVideoState();
+              } else {
+                clearInterval(interval);
+              }
+            }, 500);
+          }
         }
       },
       (id) => {
@@ -48,11 +84,25 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
         setSelfId(socket.id);
         joinRoom();
       });
-      socket.once('connect', joinRoom);
     }
 
     pmLocal.initLocalStream().then(stream => {
       setVideoMap(p => ({ ...p, local: stream }));
+      const audioTrack = stream.getAudioTracks()[0];
+      const videoTrack = stream.getVideoTracks()[0];
+      if (audioTrack) {
+        setPeerMicStates(p => ({ ...p, local: audioTrack.enabled }));
+      }
+      if (videoTrack) {
+        setPeerCamStates(p => ({ ...p, local: videoTrack.enabled }));
+      }
+      stream.getTracks().forEach(track => {
+        track.onended = () => {
+          if (track.kind === 'video') {
+            setPeerCamStates(p => ({ ...p, local: false }));
+          }
+        };
+      });
     }).catch(() => alert('Unable to access camera/microphone'));
 
     socket.on('current-peers', ({ peers, share }: { peers: PeerInfo[]; share?: { shareOwner: string | null; shareName: string | null } }) => {
@@ -72,7 +122,6 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
 
     socket.on('peer-joined', ({ socketId, userName: name }) => {
       setPeerNames(prev => ({ ...prev, [socketId]: name || 'Guest' }));
-      // existing peers should create offer to new peer
       pmLocal.createOffer(socketId).catch((e) => console.warn('offer failed', e));
     });
 
@@ -91,7 +140,6 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
     });
 
     socket.on('share-started', ({ socketId, userName: sharerName }) => {
-      // if someone else starts, stop our share
       if (socketId !== socket.id && sharing) {
         pm?.stopScreenShare().catch(() => {});
         setSharing(false);
@@ -128,6 +176,7 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
     const next = !micOn;
     setMicOn(next);
     pm?.setAudioEnabled(next);
+    setPeerMicStates(p => ({ ...p, local: next }));
   };
 
   const toggleCam = async () => {
@@ -135,8 +184,18 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
     try {
       await pm?.setVideoState(next);
       setCamOn(next);
+      setPeerCamStates(p => ({ ...p, local: next }));
+      if (pm?.localStream) {
+        setVideoMap(prev => {
+          const updated = { ...prev };
+          updated.local = pm.localStream!;
+          return updated;
+        });
+        setTimeout(() => {
+          setVideoMap(prev => ({ ...prev }));
+        }, 100);
+      }
     } catch (e) {
-      // if re-acquire fails, revert state
       setCamOn(camOn);
       alert('Unable to toggle camera. Check permissions.');
     }
@@ -145,11 +204,18 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
   const toggleShare = async () => {
     if (!pm) return;
     if (sharing) {
-      await pm.stopScreenShare();
-      setSharing(false);
-      socket.emit('stop-share', { roomId });
-      setCamOn(true);
-      setShareMap(prev => { const c = { ...prev }; delete c['local']; return c; });
+      try {
+        await pm.stopScreenShare();
+        setSharing(false);
+        socket.emit('stop-share', { roomId });
+        setCamOn(true);
+        setShareMap(prev => { const c = { ...prev }; delete c['local']; return c; });
+        if (pm.localStream) {
+          setVideoMap(prev => ({ ...prev, local: pm.localStream! }));
+        }
+      } catch (e) {
+        console.error('Error stopping screen share:', e);
+      }
       return;
     }
     try {
@@ -161,55 +227,44 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
       }
       socket.emit('start-share', { roomId, userName });
     } catch (e) {
-      alert('Screen share failed or was cancelled.');
+      console.error('Screen share error:', e);
+      if (e instanceof Error && e.name !== 'NotAllowedError' && e.name !== 'AbortError') {
+        alert('Screen share failed. Please try again.');
+      }
+      setSharing(false);
+      setCamOn(true);
     }
   };
 
-  return (
-    <div className="room-root">
-      <div className="topbar">
-        <div className="meeting-meta">
-          <div className="meeting-title">Meeting</div>
-          <div className="meeting-room">Room: {roomId}</div>
-        </div>
-        <div className="control-buttons">
-          <button className={micOn ? 'pill' : 'pill pill-off'} onClick={toggleMic}>
-            {micOn ? 'Mute mic' : 'Unmute mic'}
-          </button>
-          <button className={camOn ? 'pill' : 'pill pill-off'} onClick={toggleCam}>
-            {camOn ? 'Turn camera off' : 'Turn camera on'}
-          </button>
-          <button className={sharing ? 'pill pill-share' : 'pill'} onClick={toggleShare}>
-            {sharing ? 'Stop sharing' : 'Share screen'}
-          </button>
-          <button className="pill leave" onClick={() => { onLeave(); }}>Leave</button>
-        </div>
-        <div className="user-label">
-          <div>{userName}</div>
-        </div>
-      </div>
+  const participantCount = Object.keys(peerNames).length + 1;
 
-      <div className="main">
-        <div className="stage-area">
+  return (
+    <div className="w-full h-screen flex flex-col bg-[#202124]">
+      <TopBar roomId={roomId} userName={userName} participants={participantCount} />
+
+      <div className="flex flex-1 gap-0 overflow-hidden">
+        <div className="flex-1 flex flex-col bg-[#202124] relative min-w-0">
           <VideoGrid
             videos={videoMap}
             shares={shareMap}
             peerNames={peerNames}
+            peerMicStates={peerMicStates}
+            peerCamStates={peerCamStates}
             localName={userName}
             shareOwnerId={shareOwnerId}
             shareOwnerName={shareOwnerName}
             selfId={selfId}
           />
-          <div className="call-controls">
-            <div className="control-icon-group">
-              <button className={micOn ? 'ctrl ctrl-on' : 'ctrl ctrl-off'} onClick={toggleMic}>Mic</button>
-              <button className={camOn ? 'ctrl ctrl-on' : 'ctrl ctrl-off'} onClick={toggleCam}>Cam</button>
-              <button className={sharing ? 'ctrl ctrl-share' : 'ctrl ctrl-on'} onClick={toggleShare}>
-                {sharing ? 'Stop Share' : 'Share'}
-              </button>
-            </div>
-            <button className="ctrl ctrl-leave" onClick={() => { onLeave(); }}>End Call</button>
-          </div>
+          <CallControls
+            micOn={micOn}
+            camOn={camOn}
+            onToggleMic={toggleMic}
+            onToggleCam={toggleCam}
+            onShareScreen={toggleShare}
+            onShowParticipants={() => {}}
+            onEndCall={onLeave}
+            sharing={sharing}
+          />
         </div>
 
         <ChatPanel messages={messages} onSend={sendMessage} selfName={userName} />
@@ -217,4 +272,3 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
     </div>
   );
 }
-

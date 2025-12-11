@@ -1,4 +1,4 @@
-import { Mic, MicOff } from 'lucide-react';
+import { FiMic as Mic, FiMicOff as MicOff } from 'react-icons/fi';
 
 interface User {
   id: number;

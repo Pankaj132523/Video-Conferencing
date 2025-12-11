@@ -1,4 +1,4 @@
-import { Smile, Send } from 'lucide-react';
+import { FiSmile as Smile, FiSend as Send } from 'react-icons/fi';
 import { useState } from 'react';
 
 interface ChatInputProps {

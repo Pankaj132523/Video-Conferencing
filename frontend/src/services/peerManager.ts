@@ -67,7 +67,9 @@ export class PeerManager {
     pc.ontrack = (ev) => {
       const stream = ev.streams[0];
       const label = ev.track.label?.toLowerCase() || '';
-      const isShare = label.includes('screen') || label.includes('display');
+      const kind = ev.track.kind;
+      const isShare = label.includes('screen') || label.includes('display') || label.includes('monitor') || 
+                      (kind === 'video' && (ev.track.getSettings().displaySurface !== undefined));
       this.onTrack(id, stream, isShare);
     };
     pc.onconnectionstatechange = () => {
@@ -87,7 +89,7 @@ export class PeerManager {
       }
     }
     if (this.screenTrack && this.screenStream) {
-      const alreadyExists = pc.getSenders().some(s => s.track && s.track.id === this.screenTrack.id);
+      const alreadyExists = pc.getSenders().some(s => s.track && s.track.id === this.screenTrack!.id);
       if (!alreadyExists) {
         const sender = pc.addTrack(this.screenTrack, this.screenStream);
         this.screenSenders.set(pc.connectionState + Math.random(), sender);
@@ -103,14 +105,25 @@ export class PeerManager {
     const existingVideo = this.localStream.getVideoTracks().filter(t => t.readyState === 'live');
     if (!enabled) {
       existingVideo.forEach(t => { t.enabled = false; });
+      for (const pc of this.peers.values()) {
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video' && !s.track.label.toLowerCase().includes('screen'));
+        if (sender && existingVideo[0]) {
+          await sender.replaceTrack(existingVideo[0]);
+        }
+      }
       return;
     }
     let track = existingVideo[0];
-    if (!track) {
+    if (!track || track.readyState !== 'live') {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       track = stream.getVideoTracks()[0];
       if (!track) return;
-      this.localStream.getVideoTracks().forEach(t => this.localStream!.removeTrack(t));
+      this.localStream.getVideoTracks().forEach(t => {
+        if (t.kind === 'video') {
+          this.localStream!.removeTrack(t);
+          t.stop();
+        }
+      });
       this.localStream.addTrack(track);
     } else {
       track.enabled = true;
@@ -123,51 +136,116 @@ export class PeerManager {
       if (sender) {
         await sender.replaceTrack(track);
       } else {
-        pc.addTrack(track, this.localStream);
+        if (this.localStream) {
+          pc.addTrack(track, this.localStream);
+        }
       }
     }
   }
   async startScreenShare() {
     await this.ensureLocalStream();
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-    const screenTrack = displayStream.getVideoTracks()[0];
-    if (!screenTrack || !this.localStream) return;
-    this.screenTrack = screenTrack;
-    this.screenStream = displayStream;
-    const currentCam = this.localStream.getVideoTracks()[0];
-    if (currentCam) this.originalCamTrack = currentCam;
-    for (const pc of this.peers.values()) {
-      const sender = pc.addTrack(screenTrack, displayStream);
-      this.screenSenders.set(sender.track?.id || Math.random().toString(), sender);
+    try {
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      const screenTrack = displayStream.getVideoTracks()[0];
+      if (!screenTrack || !this.localStream) return;
+      
+      this.screenTrack = screenTrack;
+      this.screenStream = displayStream;
+      
+      const currentCam = this.localStream.getVideoTracks().find(t => t.kind === 'video' && !t.label.toLowerCase().includes('screen'));
+      if (currentCam) {
+        this.originalCamTrack = currentCam;
+        currentCam.enabled = false;
+      }
+      
+      for (const pc of this.peers.values()) {
+        const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (videoSender) {
+          await videoSender.replaceTrack(screenTrack);
+          this.screenSenders.set(pc.connectionState + Math.random().toString(), videoSender);
+        } else {
+          const sender = pc.addTrack(screenTrack, displayStream);
+          this.screenSenders.set(sender.track?.id || Math.random().toString(), sender);
+        }
+      }
+      
+      screenTrack.onended = () => {
+        this.stopScreenShare();
+      };
+    } catch (error) {
+      console.error('Screen share error:', error);
+      throw error;
     }
-    this.screenStream = displayStream;
-    screenTrack.onended = () => {
-      this.stopScreenShare();
-    };
   }
   async stopScreenShare() {
     if (!this.localStream) return;
+    
     if (this.screenTrack) {
-      try { this.screenTrack.stop(); } catch {}
+      try { 
+        this.screenTrack.stop(); 
+      } catch (e) {
+        console.warn('Error stopping screen track:', e);
+      }
       this.screenTrack = null;
     }
-    for (const pc of this.peers.values()) {
-      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video' && s.track.label.toLowerCase().includes('screen'));
-      if (sender) {
-        try { pc.removeTrack(sender); } catch {}
+    
+    let camTrack = this.originalCamTrack;
+    if (!camTrack || camTrack.readyState !== 'live') {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        camTrack = stream.getVideoTracks()[0] || null;
+        if (camTrack) {
+          this.originalCamTrack = camTrack;
+          const existingVideo = this.localStream.getVideoTracks().find(t => t.kind === 'video');
+          if (existingVideo) {
+            this.localStream.removeTrack(existingVideo);
+          }
+          this.localStream.addTrack(camTrack);
+        }
+      } catch (error) {
+        console.error('Error getting camera:', error);
+      }
+    } else {
+      camTrack.enabled = true;
+      const existingVideo = this.localStream.getVideoTracks().find(t => t.kind === 'video');
+      if (!existingVideo || existingVideo.id !== camTrack.id) {
+        if (existingVideo) {
+          this.localStream.removeTrack(existingVideo);
+        }
+        this.localStream.addTrack(camTrack);
       }
     }
+    
+    if (camTrack) {
+      for (const pc of this.peers.values()) {
+        const videoSender = pc.getSenders().find(s => 
+          s.track && s.track.kind === 'video'
+        );
+        
+        if (videoSender) {
+          try {
+            await videoSender.replaceTrack(camTrack);
+          } catch (error) {
+            console.error('Error replacing track with camera:', error);
+            try {
+              pc.removeTrack(videoSender);
+              pc.addTrack(camTrack, this.localStream!);
+            } catch (e) {
+              console.error('Error in fallback track replacement:', e);
+            }
+          }
+        } else {
+          try {
+            pc.addTrack(camTrack, this.localStream!);
+          } catch (e) {
+            console.error('Error adding camera track:', e);
+          }
+        }
+      }
+    }
+    
     this.screenSenders.clear();
     this.screenStream = null;
-    if (!this.originalCamTrack || this.originalCamTrack.readyState !== 'live') {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      this.originalCamTrack = stream.getVideoTracks()[0] || null;
-    }
-    const cam = this.originalCamTrack;
-    if (!cam) return;
-    this.localStream.getVideoTracks().forEach(t => this.localStream!.removeTrack(t));
-    this.localStream.addTrack(cam);
-    await this._replaceVideoTrack(cam);
   }
   _cleanupPeer(id: string) {
     const pc = this.peers.get(id);
@@ -178,4 +256,3 @@ export class PeerManager {
     this.onRemove(id);
   }
 }
-
