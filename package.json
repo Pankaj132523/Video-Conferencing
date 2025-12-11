@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "lucide-react": "^0.560.0",
+    "tailwind-scrollbar": "^4.0.2"
+  }
+}
