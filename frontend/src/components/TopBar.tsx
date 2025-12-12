@@ -14,7 +14,7 @@ const TopBar = ({ meetingTitle, duration, participants, roomId, userName }: TopB
 
   const copyMeetingLink = () => {
     if (!roomId) return;
-    const meetingUrl = `${window.location.origin}/meeting/${roomId}`;
+    const meetingUrl = `${window.location.origin}/video-conference/meeting/${roomId}`;
     navigator.clipboard.writeText(meetingUrl).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
