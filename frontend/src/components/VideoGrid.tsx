@@ -71,13 +71,23 @@ const VideoGrid = ({
   useEffect(() => {
     Object.entries(videos).forEach(([id, stream]) => {
       const video = videoRefs.current[id];
-      if (video && stream) {
+      if (video && stream && video.isConnected) {
         if (video.srcObject !== stream) {
           video.srcObject = stream;
         }
         const videoTrack = stream.getVideoTracks().find(t => t.readyState === 'live');
         if (videoTrack && videoTrack.enabled) {
-          video.play().catch(e => console.warn('Video play failed:', e));
+          // Use requestAnimationFrame to ensure element is ready
+          requestAnimationFrame(() => {
+            if (video && video.isConnected && video.srcObject === stream) {
+              video.play().catch(e => {
+                // Only log if it's not an AbortError (element removed)
+                if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                  console.warn('Video play failed:', e);
+                }
+              });
+            }
+          });
         } else {
           video.pause();
         }
@@ -88,11 +98,19 @@ const VideoGrid = ({
   useEffect(() => {
     Object.entries(shares).forEach(([id, stream]) => {
       const video = shareRefs.current[id];
-      if (video && stream) {
+      if (video && stream && video.isConnected) {
         if (video.srcObject !== stream) {
           video.srcObject = stream;
         }
-        video.play().catch(e => console.warn('Share video play failed:', e));
+        requestAnimationFrame(() => {
+          if (video && video.isConnected && video.srcObject === stream) {
+            video.play().catch(e => {
+              if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                console.warn('Share video play failed:', e);
+              }
+            });
+          }
+        });
       }
     });
   }, [shares]);
@@ -112,11 +130,19 @@ const VideoGrid = ({
   useEffect(() => {
     if (shareStream && shareOwnerId) {
       const video = shareRefs.current[shareOwnerId];
-      if (video && shareStream) {
+      if (video && shareStream && video.isConnected) {
         if (video.srcObject !== shareStream) {
           video.srcObject = shareStream;
         }
-        video.play().catch(e => console.warn('Share video play failed:', e));
+        requestAnimationFrame(() => {
+          if (video && video.isConnected && video.srcObject === shareStream) {
+            video.play().catch(e => {
+              if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                console.warn('Share video play failed:', e);
+              }
+            });
+          }
+        });
       }
     }
   }, [shareStream, shareOwnerId]);
@@ -167,7 +193,18 @@ const VideoGrid = ({
                     if (el.srcObject !== shareStream) {
                       el.srcObject = shareStream;
                     }
-                    el.play().catch(e => console.warn('Share video play failed:', e));
+                    // Wait for element to be connected to DOM
+                    if (el.isConnected) {
+                      requestAnimationFrame(() => {
+                        if (el && el.isConnected && el.srcObject === shareStream) {
+                          el.play().catch(e => {
+                            if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                              console.warn('Share video play failed:', e);
+                            }
+                          });
+                        }
+                      });
+                    }
                   }
                 }
               }}
@@ -207,8 +244,16 @@ const VideoGrid = ({
                                 el.srcObject = stream;
                               }
                               const videoTrack = stream.getVideoTracks().find(t => t.readyState === 'live');
-                              if (videoTrack && videoTrack.enabled) {
-                                el.play().catch(e => console.warn('Video play failed:', e));
+                              if (videoTrack && videoTrack.enabled && el.isConnected) {
+                                requestAnimationFrame(() => {
+                                  if (el && el.isConnected && el.srcObject === stream) {
+                                    el.play().catch(e => {
+                                      if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                                        console.warn('Video play failed:', e);
+                                      }
+                                    });
+                                  }
+                                });
                               } else {
                                 el.pause();
                               }

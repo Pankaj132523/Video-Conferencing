@@ -1,14 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import io from 'socket.io-client';
+import { socket } from '../socket';
 import { useNavigate } from 'react-router-dom';
 import { FiCopy as Copy, FiCheck as Check } from 'react-icons/fi';
 
 export default function RoomList({ onJoin, userName }: { onJoin: (id: string) => void; userName: string }) {
   const [newRoom, setNewRoom] = useState('');
   const [rooms, setRooms] = useState<string[]>([]);
-  const [socket] = useState(() => io('/video-conference-socket.io', {
-    path: '/video-conference-socket.io'
-  }));
   const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
   const navigate = useNavigate();
 

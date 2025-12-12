@@ -10,7 +10,12 @@ app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }
+  path: '/socket.io',
+  transports: ['websocket', 'polling'],
+  cors: { 
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
 });
 
 const rooms = new Map();

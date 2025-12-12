@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import io from 'socket.io-client';
+import { socket } from '../socket';
 import { PeerManager } from '../services/peerManager';
 import VideoGrid from './VideoGrid';
 import ChatPanel from './ChatPanel';
@@ -9,9 +9,6 @@ import TopBar from './TopBar';
 type PeerInfo = { id: string; userName: string };
 
 export default function Room({ roomId, userName, onLeave }: { roomId: string; userName: string; onLeave: () => void }) {
-  const [socket] = useState(() => io('/video-conference-socket.io', {
-    path: '/video-conference-socket.io'
-  }));
   const [videoMap, setVideoMap] = useState<Record<string, MediaStream | undefined>>({});
   const [shareMap, setShareMap] = useState<Record<string, MediaStream | undefined>>({});
   const [peerNames, setPeerNames] = useState<Record<string, string>>({});
@@ -75,15 +72,38 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
     );
     setPm(pmLocal);
 
-    const joinRoom = () => socket.emit('join-room', { roomId, userName });
+    const joinRoom = () => {
+      if (socket.connected) {
+        socket.emit('join-room', { roomId, userName });
+      } else {
+        console.warn('Socket not connected, waiting for connection...');
+        socket.once('connect', () => {
+          console.log('Socket connected, joining room');
+          socket.emit('join-room', { roomId, userName });
+        });
+        // Force connection if disconnected
+        if (socket.disconnected) {
+          socket.connect();
+        }
+      }
+    };
+    
     if (socket.connected) {
-      setSelfId(socket.id ?? '');
+      const id = socket.id ?? '';
+      setSelfId(id);
+      pmLocal.setSelfId(id);
       joinRoom();
     } else {
       socket.once('connect', () => {
-        setSelfId(socket.id ?? '');
+        const id = socket.id ?? '';
+        setSelfId(id);
+        pmLocal.setSelfId(id);
         joinRoom();
       });
+      // Ensure socket is connecting if disconnected
+      if (socket.disconnected) {
+        socket.connect();
+      }
     }
 
     pmLocal.initLocalStream().then(stream => {
@@ -106,13 +126,16 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
     }).catch(() => alert('Unable to access camera/microphone'));
 
     socket.on('current-peers', ({ peers, share }: { peers: PeerInfo[]; share?: { shareOwner: string | null; shareName: string | null } }) => {
-      peers.forEach(async ({ id, userName: name }) => {
+      peers.forEach(async ({ id, userName: name }, index) => {
         setPeerNames(prev => ({ ...prev, [id]: name }));
-        try {
-          await pmLocal.createOffer(id);
-        } catch (e) {
-          console.warn('offer failed', e);
-        }
+        // Add small delay to prevent race conditions when multiple peers join
+        setTimeout(async () => {
+          try {
+            await pmLocal.createOffer(id);
+          } catch (e) {
+            console.warn('offer failed', e);
+          }
+        }, index * 100);
       });
       if (share) {
         setShareOwnerId(share.shareOwner || null);
@@ -122,7 +145,10 @@ export default function Room({ roomId, userName, onLeave }: { roomId: string; us
 
     socket.on('peer-joined', ({ socketId, userName: name }) => {
       setPeerNames(prev => ({ ...prev, [socketId]: name || 'Guest' }));
-      pmLocal.createOffer(socketId).catch((e) => console.warn('offer failed', e));
+      // Add small delay to ensure peer connection is ready
+      setTimeout(() => {
+        pmLocal.createOffer(socketId).catch((e) => console.warn('offer failed', e));
+      }, 200);
     });
 
     socket.on('signal', ({ from, data }) => {

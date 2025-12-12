@@ -12,6 +12,19 @@ export class PeerManager {
   private originalCamTrack: MediaStreamTrack | null = null;
   private screenTrack: MediaStreamTrack | null = null;
   private screenSenders: Map<string, RTCRtpSender> = new Map();
+  private selfId: string = '';
+  
+  setSelfId(id: string) {
+    this.selfId = id;
+  }
+  
+  // Determine if we should create an offer based on socket ID comparison
+  // Peer with "lower" ID creates the offer to avoid race conditions
+  shouldCreateOffer(peerId: string): boolean {
+    if (!this.selfId || !peerId) return true; // Default to creating offer if IDs not set
+    return this.selfId < peerId;
+  }
+  
   constructor(
     sendSignal: (to: string, data: any) => void,
     onTrack: (id: string, stream: MediaStream, isShare: boolean) => void,
@@ -34,28 +47,187 @@ export class PeerManager {
     return this.localReady;
   }
   async createOffer(peerId: string) {
+    // Only create offer if we should (based on ID comparison to avoid race conditions)
+    if (!this.shouldCreateOffer(peerId)) {
+      console.log('Not creating offer for', peerId, '- waiting for their offer');
+      return;
+    }
+    
     await this.ensureLocalStream();
-    const pc = this._createPeerConnection(peerId);
-    this._attachLocalTracks(pc);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    this.sendSignal(peerId, { type: 'offer', sdp: pc.localDescription });
+    let pc = this.peers.get(peerId);
+    
+    // If peer connection exists but is in wrong state, close and recreate
+    if (pc && (pc.signalingState !== 'stable' || pc.connectionState === 'closed' || pc.connectionState === 'failed')) {
+      try { pc.close(); } catch (e) {}
+      this.peers.delete(peerId);
+      pc = undefined;
+    }
+    
+    if (!pc) {
+      pc = this._createPeerConnection(peerId);
+      this._attachLocalTracks(pc);
+    }
+    
+    // Only create offer if in stable state
+    if (pc && pc.signalingState === 'stable') {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        this.sendSignal(peerId, { type: 'offer', sdp: pc.localDescription });
+      } catch (error: any) {
+        console.error('Error creating offer:', error);
+        // If error, close and retry
+        if (pc) {
+          try { pc.close(); } catch (e) {}
+          this.peers.delete(peerId);
+        }
+        // Retry after a short delay
+        setTimeout(() => {
+          this.createOffer(peerId).catch(e => console.warn('Retry offer failed:', e));
+        }, 1000);
+      }
+    }
   }
   async handleSignal(from: string, data: any) {
     if (data.type === 'offer') {
       await this.ensureLocalStream();
-      const pc = this._createPeerConnection(from);
-      this._attachLocalTracks(pc);
-      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      const ans = await pc.createAnswer();
-      await pc.setLocalDescription(ans);
-      this.sendSignal(from, { type: 'answer', sdp: pc.localDescription });
+      let pc = this.peers.get(from);
+      
+      // If peer connection exists and is in wrong state, close and recreate
+      if (pc && (pc.signalingState === 'stable' || pc.signalingState === 'closed')) {
+        try { pc.close(); } catch (e) {}
+        this.peers.delete(from);
+        pc = undefined;
+      }
+      
+      if (!pc) {
+        pc = this._createPeerConnection(from);
+        this._attachLocalTracks(pc);
+      }
+      
+      // Only set remote description if in correct state
+      if (pc) {
+        if (pc.signalingState === 'stable') {
+          // We're in stable state, which means we might have already created an offer
+          // If we should create the offer (lower ID), close and let them handle it
+          // Otherwise, close and handle their offer
+          if (this.shouldCreateOffer(from)) {
+            console.log('Received offer but we should create it, closing and recreating...');
+            try { pc.close(); } catch (e) {}
+            this.peers.delete(from);
+            // Create our own offer
+            setTimeout(() => {
+              this.createOffer(from).catch(e => console.warn('Retry offer failed:', e));
+            }, 500);
+          } else {
+            // We should handle their offer, close and recreate
+            try { pc.close(); } catch (e) {}
+            this.peers.delete(from);
+            pc = this._createPeerConnection(from);
+            this._attachLocalTracks(pc);
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+              const ans = await pc.createAnswer();
+              await pc.setLocalDescription(ans);
+              this.sendSignal(from, { type: 'answer', sdp: pc.localDescription });
+            } catch (error: any) {
+              console.error('Error handling offer:', error);
+              try { pc.close(); } catch (e) {}
+              this.peers.delete(from);
+            }
+          }
+        } else if (pc.signalingState === 'have-local-offer') {
+          // We already have a local offer, this shouldn't happen but handle it
+          console.warn('Received offer but we already have a local offer, closing and handling theirs');
+          try { pc.close(); } catch (e) {}
+          this.peers.delete(from);
+          pc = this._createPeerConnection(from);
+          this._attachLocalTracks(pc);
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            const ans = await pc.createAnswer();
+            await pc.setLocalDescription(ans);
+            this.sendSignal(from, { type: 'answer', sdp: pc.localDescription });
+          } catch (error: any) {
+            console.error('Error handling offer:', error);
+            try { pc.close(); } catch (e) {}
+            this.peers.delete(from);
+          }
+        } else {
+          // Normal case - handle the offer
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            const ans = await pc.createAnswer();
+            await pc.setLocalDescription(ans);
+            this.sendSignal(from, { type: 'answer', sdp: pc.localDescription });
+          } catch (error: any) {
+            console.error('Error handling offer:', error);
+            if (pc) {
+              try { pc.close(); } catch (e) {}
+              this.peers.delete(from);
+            }
+          }
+        }
+      }
     } else if (data.type === 'answer') {
       const pc = this.peers.get(from);
-      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      if (pc) {
+        // Only set remote description if we have a local offer
+        if (pc.signalingState === 'have-local-offer') {
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+          } catch (error: any) {
+            console.error('Error setting remote answer:', error);
+            // If error, try to recreate connection
+            try { pc.close(); } catch (e) {}
+            this.peers.delete(from);
+            // Retry by creating a new offer
+            setTimeout(() => {
+              this.createOffer(from).catch(e => console.warn('Retry offer failed:', e));
+            }, 1000);
+          }
+        } else if (pc.signalingState === 'stable') {
+          // Already connected - this might happen if we received an answer after connection was established
+          // Check if we should create a new offer (in case connection is broken)
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+            console.log('Received answer in stable state but connection is broken, recreating...');
+            try { pc.close(); } catch (e) {}
+            this.peers.delete(from);
+            // Wait a bit then create new offer if we should
+            setTimeout(() => {
+              if (this.shouldCreateOffer(from)) {
+                this.createOffer(from).catch(e => console.warn('Retry offer failed:', e));
+              }
+            }, 500);
+          } else {
+            // Connection is good, just ignore the duplicate answer
+            console.log('Received answer in stable state, connection is good - ignoring');
+          }
+        } else {
+          // In some other state, try to handle it
+          console.warn('Received answer in unexpected state:', pc.signalingState);
+        }
+      } else {
+        // No peer connection exists - this shouldn't happen, but create one if we should
+        console.warn('Received answer but no peer connection exists for', from);
+        if (this.shouldCreateOffer(from)) {
+          setTimeout(() => {
+            this.createOffer(from).catch(e => console.warn('Retry offer failed:', e));
+          }, 500);
+        }
+      }
     } else if (data.type === 'candidate') {
       const pc = this.peers.get(from);
-      if (pc) pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+      if (pc && pc.remoteDescription) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (error: any) {
+          // Ignore errors for duplicate or invalid candidates
+          if (error.name !== 'OperationError' && error.name !== 'InvalidStateError') {
+            console.warn('Error adding ICE candidate:', error);
+          }
+        }
+      }
     }
   }
   _createPeerConnection(id: string) {
