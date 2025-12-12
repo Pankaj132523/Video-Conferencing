@@ -97,7 +97,7 @@ function MeetingPage() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/video-conference">
       <Routes>
         <Route path="/" element={<RoomListPage />} />
         <Route path="/meeting/:roomId" element={<MeetingPage />} />
